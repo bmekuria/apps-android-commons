@@ -16,7 +16,6 @@ import android.view.MenuInflater;
 import android.view.MenuItem;
 import android.view.View;
 import android.view.ViewGroup;
-import android.view.inputmethod.InputMethodManager;
 import android.widget.AdapterView;
 import android.widget.BaseAdapter;
 import android.widget.EditText;
@@ -24,13 +23,18 @@ import android.widget.FrameLayout;
 import android.widget.GridView;
 import android.widget.RelativeLayout;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import com.facebook.drawee.generic.GenericDraweeHierarchyBuilder;
 import com.facebook.drawee.view.SimpleDraweeView;
 
+import butterknife.BindView;
+import butterknife.ButterKnife;
+import dagger.android.support.AndroidSupportInjection;
 import fr.free.nrw.commons.R;
 import fr.free.nrw.commons.contributions.Contribution;
 import fr.free.nrw.commons.media.MediaDetailPagerFragment;
+import fr.free.nrw.commons.utils.ViewUtil;
 
 public class MultipleUploadListFragment extends Fragment {
 
@@ -38,9 +42,13 @@ public class MultipleUploadListFragment extends Fragment {
         void OnMultipleUploadInitiated();
     }
 
-    private GridView photosGrid;
+    @BindView(R.id.multipleShareBackground)
+    GridView photosGrid;
+
+    @BindView(R.id.multipleBaseTitle)
+    EditText baseTitle;
+
     private PhotoDisplayAdapter photosAdapter;
-    private EditText baseTitle;
     private TitleTextWatcher textWatcher = new TitleTextWatcher();
 
     private Point photoSize;
@@ -54,6 +62,12 @@ public class MultipleUploadListFragment extends Fragment {
         private SimpleDraweeView image;
         private TextView title;
         private RelativeLayout overlay;
+    }
+
+    @Override
+    public void onAttach(Context context) {
+        AndroidSupportInjection.inject(this);
+        super.onAttach(context);
     }
 
     private class PhotoDisplayAdapter extends BaseAdapter {
@@ -77,12 +91,12 @@ public class MultipleUploadListFragment extends Fragment {
         public View getView(int i, View view, ViewGroup viewGroup) {
             UploadHolderView holder;
 
-            if(view == null) {
-                view = getLayoutInflater(null).inflate(R.layout.layout_upload_item, null);
+            if (view == null) {
+                view = LayoutInflater.from(getContext()).inflate(R.layout.layout_upload_item, viewGroup, false);
                 holder = new UploadHolderView();
-                holder.image = (SimpleDraweeView) view.findViewById(R.id.uploadImage);
-                holder.title = (TextView) view.findViewById(R.id.uploadTitle);
-                holder.overlay = (RelativeLayout) view.findViewById(R.id.uploadOverlay);
+                holder.image = view.findViewById(R.id.uploadImage);
+                holder.title = view.findViewById(R.id.uploadTitle);
+                holder.overlay = view.findViewById(R.id.uploadOverlay);
 
                 holder.image.setLayoutParams(new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, photoSize.y));
                 holder.image.setHierarchy(GenericDraweeHierarchyBuilder
@@ -94,17 +108,17 @@ public class MultipleUploadListFragment extends Fragment {
                         .build());
                 view.setTag(holder);
             } else {
-                holder = (UploadHolderView)view.getTag();
+                holder = (UploadHolderView) view.getTag();
             }
 
-            Contribution up = (Contribution)this.getItem(i);
+            Contribution up = (Contribution) this.getItem(i);
 
-            if(holder.imageUri == null || !holder.imageUri.equals(up.getLocalUri())) {
+            if (holder.imageUri == null || !holder.imageUri.equals(up.getLocalUri())) {
                 holder.image.setImageURI(up.getLocalUri().toString());
                 holder.imageUri = up.getLocalUri();
             }
 
-            if(!imageOnlyMode) {
+            if (!imageOnlyMode) {
                 holder.overlay.setVisibility(View.VISIBLE);
                 holder.title.setText(up.getFilename());
             } else {
@@ -120,11 +134,8 @@ public class MultipleUploadListFragment extends Fragment {
         super.onStop();
 
         // FIXME: Stops the keyboard from being shown 'stale' while moving out of this fragment into the next
-        View target = getView().findFocus();
-        if (target != null) {
-            InputMethodManager imm = (InputMethodManager) target.getContext().getSystemService(Context.INPUT_METHOD_SERVICE);
-            imm.hideSoftInputFromWindow(target.getWindowToken(), 0);
-        }
+        View target = getActivity().getCurrentFocus();
+        ViewUtil.hideKeyboard(target);
     }
 
     // FIXME: Wrong result type
@@ -134,21 +145,21 @@ public class MultipleUploadListFragment extends Fragment {
         int screenHeight = screenMetrics.heightPixels;
 
         int picWidth = Math.min((int) Math.sqrt(screenWidth * screenHeight / count), screenWidth);
-        picWidth = Math.min((int)(192 * screenMetrics.density), Math.max((int) (120  * screenMetrics.density), picWidth / 48 * 48));
-        int picHeight = Math.min(picWidth, (int)(192 * screenMetrics.density)); // Max Height is same as Contributions list
+        picWidth = Math.min((int) (192 * screenMetrics.density), Math.max((int) (120 * screenMetrics.density), picWidth / 48 * 48));
+        int picHeight = Math.min(picWidth, (int) (192 * screenMetrics.density)); // Max Height is same as Contributions list
 
         return new Point(picWidth, picHeight);
     }
 
     public void notifyDatasetChanged() {
-        if(photosAdapter != null) {
+        if (photosAdapter != null) {
             photosAdapter.notifyDataSetChanged();
         }
     }
 
     public void setImageOnlyMode(boolean mode) {
         imageOnlyMode = mode;
-        if(imageOnlyMode) {
+        if (imageOnlyMode) {
             baseTitle.setVisibility(View.GONE);
         } else {
             baseTitle.setVisibility(View.VISIBLE);
@@ -159,17 +170,22 @@ public class MultipleUploadListFragment extends Fragment {
 
     @Override
     public View onCreateView(LayoutInflater inflater, ViewGroup container, Bundle savedInstanceState) {
-        View view = inflater.inflate(R.layout.fragment_multiple_uploads_list, null);
-        photosGrid = (GridView)view.findViewById(R.id.multipleShareBackground);
-        baseTitle = (EditText)view.findViewById(R.id.multipleBaseTitle);
-
+        View view = inflater.inflate(R.layout.fragment_multiple_uploads_list, container, false);
+        ButterKnife.bind(this,view);
         photosAdapter = new PhotoDisplayAdapter();
         photosGrid.setAdapter(photosAdapter);
-        photosGrid.setOnItemClickListener((AdapterView.OnItemClickListener)getActivity());
+        photosGrid.setOnItemClickListener((AdapterView.OnItemClickListener) getActivity());
         photoSize = calculatePicDimension(detailProvider.getTotalMediaCount());
         photosGrid.setColumnWidth(photoSize.x);
 
         baseTitle.addTextChangedListener(textWatcher);
+
+        baseTitle.setOnFocusChangeListener((v, hasFocus) -> {
+            if (!hasFocus) {
+                ViewUtil.hideKeyboard(v);
+            }
+        });
+
         return view;
     }
 
@@ -188,8 +204,12 @@ public class MultipleUploadListFragment extends Fragment {
 
     @Override
     public boolean onOptionsItemSelected(MenuItem item) {
-        switch(item.getItemId()) {
+        switch (item.getItemId()) {
             case R.id.menu_upload_multiple:
+                if (baseTitle.getText().toString().trim().isEmpty()) {
+                    Toast.makeText(getContext(), R.string.add_set_name_toast, Toast.LENGTH_LONG).show();
+                    return false;
+                }
                 multipleUploadInitiatedHandler.OnMultipleUploadInitiated();
                 return true;
         }
@@ -200,7 +220,7 @@ public class MultipleUploadListFragment extends Fragment {
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        detailProvider = (MediaDetailPagerFragment.MediaDetailProvider)getActivity();
+        detailProvider = (MediaDetailPagerFragment.MediaDetailProvider) getActivity();
         multipleUploadInitiatedHandler = (OnMultipleUploadInitiatedHandler) getActivity();
 
         setHasOptionsMenu(true);
@@ -213,12 +233,12 @@ public class MultipleUploadListFragment extends Fragment {
 
         @Override
         public void onTextChanged(CharSequence charSequence, int i1, int i2, int i3) {
-            for(int i = 0; i < detailProvider.getTotalMediaCount(); i++) {
+            for (int i = 0; i < detailProvider.getTotalMediaCount(); i++) {
                 Contribution up = (Contribution) detailProvider.getMediaAtPosition(i);
-                Boolean isDirty = (Boolean)up.getTag("isDirty");
-                if(isDirty == null || !isDirty) {
-                    if(!TextUtils.isEmpty(charSequence)) {
-                        up.setFilename(charSequence.toString() + " - " + ((Integer)up.getTag("sequence") + 1));
+                Boolean isDirty = (Boolean) up.getTag("isDirty");
+                if (isDirty == null || !isDirty) {
+                    if (!TextUtils.isEmpty(charSequence)) {
+                        up.setFilename(charSequence.toString() + " - " + ((Integer) up.getTag("sequence") + 1));
                     } else {
                         up.setFilename("");
                     }

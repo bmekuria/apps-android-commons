@@ -1,6 +1,94 @@
 # Wikimedia Commons for Android
 
-## v2.5.0 beta
+## v2.8.5
+- Fixed issues with sporadic upload failures due to wrong mimeType
+
+## v2.8.4
+- Hotfix for constant upload crashes for Oreo users
+
+## v2.8.3
+- Fixed issues with session tokens not being cleared in 2FA, which should reduce p18 edit failures as well
+- Fixed crash caused by bug in fetching revert count
+- Fixed crash potentially caused by Traceur library
+
+## v2.8.2
+- Fixed bug with uploads sent via Share being given .jpeg extensions and overwriting files of the same name
+
+## v2.8.1
+- Fixed bug with category edits not being sent to server
+
+## v2.8.0
+- Fixed failed uploads by modifying auth token
+- Fixed crashes during upload by storing file temporarily
+- Added automatic Wikidata p18 edits upon Nearby upload
+- Added Explore feature to browse other Commons images, including featured images
+- Added Achievements feature to see current level and upload stats
+- Added quiz for users with high deletion rates
+- Added first run tutorial for Nearby
+- Various small improvements to ShareActivity UI
+
+## v2.7.2
+- Modified subtext for "automatically get current location" setting to emphasize that it will reveal user's location
+
+## v2.7.1
+- Fixed UI and permission issues with Nearby
+- Fixed issue with My Recent Uploads being empty
+- Fixed blank category issue when uploading directly from Nearby
+- Various crash fixes
+
+## v2.7.0
+- New Nearby Places UI with direct uploads (and associated category suggestions)
+- Added two-factor authentication login
+- Added Notifications activity to display user talk messages
+- Added real-time location tracking in Nearby
+- Added "rate us", "translate", and FB link in About
+- Improvements to UI of navigation drawer, tutorial, media details view, login activity and Settings
+- Added option to nominate picture for deletion in media details view
+- Too many bug and crash fixes to mention!
+
+## v2.6.7
+- Added null checks to prevent frequent crashes in ModificationsSyncAdapter
+
+## v2.6.6
+- Refactored Dagger to fix crashes encountered in production
+- Fixed "?" displaying in description of Nearby places
+- Database-related cleanup and tests
+- Optimized dimens.xml
+- Fixed issue where map opens with incorrect coordinates
+
+## v2.6.5 beta
+- Changed "send log" feature to only send logs to private Google group forum
+- Switched to using Wikimedia maps server instead of Mapbox for privacy reasons
+- Removed event logging from app for privacy reasons
+- Fixed crash caused by rapidly switching from Nearby map to list while loading
+
+## v2.6.4 beta
+- Excluded httpclient and commons-logging to fix release build errors
+- Fixed crashes caused by Fresco and Dagger
+
+## v2.6.3 beta
+- Same as 2.6.2 except with localizations added for Google Code-In 
+
+## v2.6.2 beta
+- Reverted temporarily to last stable version while working on crash fix
+
+## v2.6.1 beta
+- Failed attempt to fix crashes in release build with the previous beta release
+
+## v2.6.0 beta
+- Multiple bugfixes for location updates and list/map loading in Nearby
+- Multiple fixes for various crashes and memory leaks
+- Added several unit tests
+- Modified About page to include WMF disclaimer and modified Privacy Policy link to point to our individual privacy policy
+- Added option for users to send logs to developers (has to be manually activated by user)
+- Converted PNGs to WebPs
+- Improved login screen with new design and privacy policy link
+- Improved category display, if a category has an exact name entered, it will be shown first
+- New UI for Nearby list
+- Added product flavors for production and the beta-cluster Wikimedia servers 
+- Various improvements to navigation flow and backstack
+
+## v2.5.0 beta 
 - Added one-time popup for beta users to provide feedback on IEG renewal proposal
 - Added link to Commons policies in ShareActivity
 - Various string fixes

@@ -4,7 +4,6 @@ import android.annotation.SuppressLint;
 import android.app.Notification;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
-import android.content.ContentProviderClient;
 import android.content.ContentResolver;
 import android.content.ContentValues;
 import android.content.Intent;
@@ -14,7 +13,12 @@ import android.support.v4.app.NotificationCompat;
 import android.webkit.MimeTypeMap;
 import android.widget.Toast;
 
+import com.j256.simplemagic.ContentInfo;
+import com.j256.simplemagic.ContentInfoUtil;
+import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileNotFoundException;
+import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.HashSet;
@@ -22,17 +26,21 @@ import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import javax.inject.Inject;
+
+import fr.free.nrw.commons.BuildConfig;
 import fr.free.nrw.commons.CommonsApplication;
 import fr.free.nrw.commons.HandlerService;
 import fr.free.nrw.commons.R;
 import fr.free.nrw.commons.Utils;
+import fr.free.nrw.commons.auth.SessionManager;
 import fr.free.nrw.commons.contributions.Contribution;
+import fr.free.nrw.commons.contributions.ContributionDao;
 import fr.free.nrw.commons.contributions.ContributionsActivity;
 import fr.free.nrw.commons.contributions.ContributionsContentProvider;
-import fr.free.nrw.commons.modifications.ModificationsContentProvider;
-import fr.free.nrw.commons.mwapi.EventLog;
 import fr.free.nrw.commons.mwapi.MediaWikiApi;
 import fr.free.nrw.commons.mwapi.UploadResult;
+import fr.free.nrw.commons.wikidata.WikidataEditService;
 import timber.log.Timber;
 
 public class UploadService extends HandlerService<Contribution> {
@@ -45,12 +53,13 @@ public class UploadService extends HandlerService<Contribution> {
     public static final String EXTRA_SOURCE = EXTRA_PREFIX + ".source";
     public static final String EXTRA_CAMPAIGN = EXTRA_PREFIX + ".campaign";
 
+    @Inject MediaWikiApi mwApi;
+    @Inject WikidataEditService wikidataEditService;
+    @Inject SessionManager sessionManager;
+    @Inject ContributionDao contributionDao;
+
     private NotificationManager notificationManager;
-    private ContentProviderClient contributionsProviderClient;
-    private CommonsApplication app;
-
     private NotificationCompat.Builder curProgressNotification;
-
     private int toUpload;
 
     // The file names of unfinished uploads, used to prevent overwriting
@@ -62,6 +71,7 @@ public class UploadService extends HandlerService<Contribution> {
     public static final int NOTIFICATION_UPLOAD_IN_PROGRESS = 1;
     public static final int NOTIFICATION_UPLOAD_COMPLETE = 2;
     public static final int NOTIFICATION_UPLOAD_FAILED = 3;
+    private ContentInfoUtil contentInfoUtil;
 
     public UploadService() {
         super("UploadService");
@@ -101,7 +111,7 @@ public class UploadService extends HandlerService<Contribution> {
             startForeground(NOTIFICATION_UPLOAD_IN_PROGRESS, curProgressNotification.build());
 
             contribution.setTransferred(transferred);
-            contribution.save();
+            contributionDao.save(contribution);
         }
 
     }
@@ -109,24 +119,20 @@ public class UploadService extends HandlerService<Contribution> {
     @Override
     public void onDestroy() {
         super.onDestroy();
-        contributionsProviderClient.release();
         Timber.d("UploadService.onDestroy; %s are yet to be uploaded", unfinishedUploads);
     }
 
     @Override
     public void onCreate() {
         super.onCreate();
-
+        CommonsApplication.createNotificationChannel(getApplicationContext());
         notificationManager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
-        app = CommonsApplication.getInstance();
-        contributionsProviderClient = this.getContentResolver().acquireContentProviderClient(ContributionsContentProvider.AUTHORITY);
     }
 
     @Override
     protected void handle(int what, Contribution contribution) {
         switch (what) {
             case ACTION_UPLOAD_FILE:
-                //FIXME: Google Photos bug
                 uploadContribution(contribution);
                 break;
             default:
@@ -136,14 +142,13 @@ public class UploadService extends HandlerService<Contribution> {
 
     @Override
     public void queue(int what, Contribution contribution) {
+        Timber.d("Upload service queue has contribution with wiki data entity id as %s", contribution.getWikiDataEntityId());
         switch (what) {
             case ACTION_UPLOAD_FILE:
 
                 contribution.setState(Contribution.STATE_QUEUED);
                 contribution.setTransferred(0);
-                contribution.setContentProviderClient(contributionsProviderClient);
-
-                contribution.save();
+                contributionDao.save(contribution);
                 toUpload++;
                 if (curProgressNotification != null && toUpload != 1) {
                     curProgressNotification.setContentText(getResources().getQuantityString(R.plurals.uploads_pending_notification_indicator, toUpload, toUpload));
@@ -162,13 +167,13 @@ public class UploadService extends HandlerService<Contribution> {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        if (intent.getAction().equals(ACTION_START_SERVICE) && freshStart) {
+        if (ACTION_START_SERVICE.equals(intent.getAction()) && freshStart) {
             ContentValues failedValues = new ContentValues();
-            failedValues.put(Contribution.Table.COLUMN_STATE, Contribution.STATE_FAILED);
+            failedValues.put(ContributionDao.Table.COLUMN_STATE, Contribution.STATE_FAILED);
 
             int updated = getContentResolver().update(ContributionsContentProvider.BASE_URI,
                     failedValues,
-                    Contribution.Table.COLUMN_STATE + " = ? OR " + Contribution.Table.COLUMN_STATE + " = ?",
+                    ContributionDao.Table.COLUMN_STATE + " = ? OR " + ContributionDao.Table.COLUMN_STATE + " = ?",
                     new String[]{ String.valueOf(Contribution.STATE_QUEUED), String.valueOf(Contribution.STATE_IN_PROGRESS) }
             );
             Timber.d("Set %d uploads to failed", updated);
@@ -179,24 +184,8 @@ public class UploadService extends HandlerService<Contribution> {
     }
 
     @SuppressLint("StringFormatInvalid")
-    private void uploadContribution(Contribution contribution) {
-        MediaWikiApi api = app.getMWApi();
-
-        InputStream file = null;
-
-        String notificationTag = contribution.getLocalUri().toString();
-
-        try {
-            //FIXME: Google Photos bug
-            file = this.getContentResolver().openInputStream(contribution.getLocalUri());
-        } catch (FileNotFoundException e) {
-            Timber.d("File not found");
-            Toast fileNotFound = Toast.makeText(this, R.string.upload_failed, Toast.LENGTH_LONG);
-            fileNotFound.show();
-        }
-
-        Timber.d("Before execution!");
-        curProgressNotification = new NotificationCompat.Builder(this).setAutoCancel(true)
+    private NotificationCompat.Builder getNotificationBuilder(Contribution contribution, String channelId) {
+        return new NotificationCompat.Builder(this, channelId).setAutoCancel(true)
                 .setSmallIcon(R.drawable.ic_launcher)
                 .setLargeIcon(BitmapFactory.decodeResource(getResources(), R.drawable.ic_launcher))
                 .setAutoCancel(true)
@@ -206,30 +195,81 @@ public class UploadService extends HandlerService<Contribution> {
                 .setProgress(100, 0, true)
                 .setContentIntent(PendingIntent.getActivity(this, 0, new Intent(this, ContributionsActivity.class), 0))
                 .setTicker(getString(R.string.upload_progress_notification_title_in_progress, contribution.getDisplayTitle()));
+    }
 
+    private void uploadContribution(Contribution contribution) {
+        InputStream fileInputStream = null;
+        InputStream tempFileInputStream = null;
+        ContentInfo contentInfo = null;
+        String notificationTag = contribution.getLocalUri().toString();
+
+        try {
+            File file1 = new File(contribution.getLocalUri().getPath());
+            fileInputStream = new FileInputStream(file1);
+            tempFileInputStream = new FileInputStream(file1);
+            if (contentInfoUtil == null) {
+                contentInfoUtil = new ContentInfoUtil();
+            }
+            contentInfo = contentInfoUtil.findMatch(tempFileInputStream);
+        } catch (FileNotFoundException e) {
+            Timber.d("File not found");
+            Toast fileNotFound = Toast.makeText(this, R.string.upload_failed, Toast.LENGTH_LONG);
+            fileNotFound.show();
+            return;
+        } catch (IOException e) {
+            Timber.d("exception while fetching MIME type: "+e);
+        } finally {
+            try {
+                if (null != tempFileInputStream) {
+                    tempFileInputStream.close();
+                }
+            } catch (IOException e) {
+                Timber.d("File not found");
+            }
+        }
+
+        //As the fileInputStream is null there's no point in continuing the upload process
+        //mwapi.upload accepts a NonNull input stream
+        if (fileInputStream == null) {
+            Timber.d("File not found");
+            return;
+        }
+
+        Timber.d("Before execution!");
+        curProgressNotification = getNotificationBuilder(
+                contribution,
+                CommonsApplication.NOTIFICATION_CHANNEL_ID_ALL);
         this.startForeground(NOTIFICATION_UPLOAD_IN_PROGRESS, curProgressNotification.build());
 
         String filename = null;
         try {
+            //try to fetch the MIME type from contentInfo first and then use the tag to do it
+            //Note : the tag has not proven trustworthy in the past
+            String mimeType;
+            if (contentInfo == null || contentInfo.getMimeType() == null) {
+                mimeType = (String) contribution.getTag("mimeType");
+            } else {
+                mimeType = contentInfo.getMimeType();
+            }
             filename = Utils.fixExtension(
                     contribution.getFilename(),
-                    MimeTypeMap.getSingleton().getExtensionFromMimeType((String)contribution.getTag("mimeType")));
+                    MimeTypeMap.getSingleton().getExtensionFromMimeType(mimeType));
 
             synchronized (unfinishedUploads) {
                 Timber.d("making sure of uniqueness of name: %s", filename);
                 filename = findUniqueFilename(filename);
                 unfinishedUploads.add(filename);
             }
-            if (!api.validateLogin()) {
+            if (!mwApi.validateLogin()) {
                 // Need to revalidate!
-                if (app.revalidateAuthToken()) {
+                if (sessionManager.revalidateAuthToken()) {
                     Timber.d("Successfully revalidated token!");
                 } else {
                     Timber.d("Unable to revalidate :(");
-                    // TODO: Put up a new notification, ask them to re-login
                     stopForeground(true);
                     Toast failureToast = Toast.makeText(this, R.string.authentication_failed, Toast.LENGTH_LONG);
                     failureToast.show();
+                    sessionManager.forceLogin(this);
                     return;
                 }
             }
@@ -238,7 +278,7 @@ public class UploadService extends HandlerService<Contribution> {
                     getString(R.string.upload_progress_notification_title_finishing, contribution.getDisplayTitle()),
                     contribution
             );
-            UploadResult uploadResult = api.uploadFile(filename, file, contribution.getDataLength(), contribution.getPageContents(), contribution.getEditSummary(), notificationUpdater);
+            UploadResult uploadResult = mwApi.uploadFile(filename, fileInputStream, contribution.getDataLength(), contribution.getPageContents(), contribution.getEditSummary(), contribution.getLocalUri(), contribution.getContentProviderUri(), notificationUpdater);
 
             Timber.d("Response is %s", uploadResult.toString());
 
@@ -246,28 +286,16 @@ public class UploadService extends HandlerService<Contribution> {
 
             String resultStatus = uploadResult.getResultStatus();
             if (!resultStatus.equals("Success")) {
+                Timber.d("Contribution upload failed. Wikidata entity won't be edited");
                 showFailedNotification(contribution);
-                EventLog.schema(CommonsApplication.EVENT_UPLOAD_ATTEMPT)
-                        .param("username", app.getCurrentAccount().name)
-                        .param("source", contribution.getSource())
-                        .param("multiple", contribution.getMultiple())
-                        .param("result", uploadResult.getErrorCode())
-                        .param("filename", contribution.getFilename())
-                        .log();
             } else {
+                Timber.d("Contribution upload success. Initiating Wikidata edit for entity id %s", contribution.getWikiDataEntityId());
+                wikidataEditService.createClaimWithLogging(contribution.getWikiDataEntityId(), filename);
                 contribution.setFilename(uploadResult.getCanonicalFilename());
                 contribution.setImageUrl(uploadResult.getImageUrl());
                 contribution.setState(Contribution.STATE_COMPLETED);
                 contribution.setDateUploaded(uploadResult.getDateUploaded());
-                contribution.save();
-
-                EventLog.schema(CommonsApplication.EVENT_UPLOAD_ATTEMPT)
-                        .param("username", app.getCurrentAccount().name)
-                        .param("source", contribution.getSource()) //FIXME
-                        .param("filename", contribution.getFilename())
-                        .param("multiple", contribution.getMultiple())
-                        .param("result", "success")
-                        .log();
+                contributionDao.save(contribution);
             }
         } catch (IOException e) {
             Timber.d("I have a network fuckup");
@@ -279,7 +307,7 @@ public class UploadService extends HandlerService<Contribution> {
             toUpload--;
             if (toUpload == 0) {
                 // Sync modifications right after all uplaods are processed
-                ContentResolver.requestSync((CommonsApplication.getInstance()).getCurrentAccount(), ModificationsContentProvider.AUTHORITY, new Bundle());
+                ContentResolver.requestSync(sessionManager.getCurrentAccount(), BuildConfig.MODIFICATION_AUTHORITY, new Bundle());
                 stopForeground(true);
             }
         }
@@ -298,11 +326,10 @@ public class UploadService extends HandlerService<Contribution> {
         notificationManager.notify(NOTIFICATION_UPLOAD_FAILED, failureNotification);
 
         contribution.setState(Contribution.STATE_FAILED);
-        contribution.save();
+        contributionDao.save(contribution);
     }
 
     private String findUniqueFilename(String fileName) throws IOException {
-        MediaWikiApi api = app.getMWApi();
         String sequenceFileName;
         for (int sequenceNumber = 1; true; sequenceNumber++) {
             if (sequenceNumber == 1) {
@@ -318,7 +345,7 @@ public class UploadService extends HandlerService<Contribution> {
                     sequenceFileName = regexMatcher.replaceAll("$1 " + sequenceNumber + "$2");
                 }
             }
-            if (!api.fileExistsWithName(sequenceFileName)
+            if (!mwApi.fileExistsWithName(sequenceFileName)
                     && !unfinishedUploads.contains(sequenceFileName)) {
                 break;
             }

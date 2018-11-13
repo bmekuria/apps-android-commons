@@ -1,51 +1,55 @@
 package fr.free.nrw.commons.contributions;
 
+import android.accounts.Account;
 import android.content.ComponentName;
-import android.content.ContentResolver;
 import android.content.Context;
-import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.ServiceConnection;
 import android.content.SharedPreferences;
 import android.database.Cursor;
 import android.database.DataSetObserver;
-import android.net.Uri;
 import android.os.Bundle;
 import android.os.IBinder;
-import android.preference.PreferenceManager;
-import android.support.annotation.NonNull;
 import android.support.v4.app.FragmentManager;
 import android.support.v4.app.LoaderManager;
 import android.support.v4.content.CursorLoader;
 import android.support.v4.content.Loader;
 import android.support.v4.widget.CursorAdapter;
-import android.support.v7.app.AlertDialog;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.view.View;
 import android.widget.Adapter;
 import android.widget.AdapterView;
 
-import com.google.common.util.concurrent.FutureCallback;
-import com.google.common.util.concurrent.Futures;
-import com.google.common.util.concurrent.ListenableFuture;
-
-import java.text.ParseException;
-import java.text.SimpleDateFormat;
 import java.util.ArrayList;
-import java.util.Date;
+
+import javax.inject.Inject;
+import javax.inject.Named;
 
 import butterknife.ButterKnife;
-import fr.free.nrw.commons.CommonsApplication;
+import fr.free.nrw.commons.BuildConfig;
 import fr.free.nrw.commons.HandlerService;
 import fr.free.nrw.commons.Media;
 import fr.free.nrw.commons.R;
 import fr.free.nrw.commons.auth.AuthenticatedActivity;
+import fr.free.nrw.commons.auth.SessionManager;
 import fr.free.nrw.commons.media.MediaDetailPagerFragment;
+import fr.free.nrw.commons.mwapi.MediaWikiApi;
+import fr.free.nrw.commons.quiz.QuizChecker;
 import fr.free.nrw.commons.settings.Prefs;
 import fr.free.nrw.commons.upload.UploadService;
-import fr.free.nrw.commons.utils.ExecutorUtils;
+import fr.free.nrw.commons.utils.ContributionUtils;
+import fr.free.nrw.commons.utils.ViewUtil;
+import io.reactivex.android.schedulers.AndroidSchedulers;
+import io.reactivex.disposables.CompositeDisposable;
+import io.reactivex.schedulers.Schedulers;
 import timber.log.Timber;
+
+import static android.content.ContentResolver.requestSync;
+import static fr.free.nrw.commons.contributions.Contribution.STATE_FAILED;
+import static fr.free.nrw.commons.contributions.ContributionDao.Table.ALL_FIELDS;
+import static fr.free.nrw.commons.contributions.ContributionsContentProvider.BASE_URI;
+import static fr.free.nrw.commons.settings.Prefs.UPLOADS_SHOWING;
 
 public  class       ContributionsActivity
         extends     AuthenticatedActivity
@@ -55,44 +59,41 @@ public  class       ContributionsActivity
                     FragmentManager.OnBackStackChangedListener,
                     ContributionsListFragment.SourceRefresher {
 
+    @Inject MediaWikiApi mediaWikiApi;
+    @Inject SessionManager sessionManager;
+    @Inject @Named("default_preferences") SharedPreferences prefs;
+    @Inject ContributionDao contributionDao;
+
     private Cursor allContributions;
     private ContributionsListFragment contributionsList;
     private MediaDetailPagerFragment mediaDetails;
     private UploadService uploadService;
     private boolean isUploadServiceConnected;
     private ArrayList<DataSetObserver> observersWaitingForLoad = new ArrayList<>();
-    private String CONTRIBUTION_SELECTION = "";
 
-    /*
-        This sorts in the following order:
-        Currently Uploading
-        Failed (Sorted in ascending order of time added - FIFO)
-        Queued to Upload (Sorted in ascending order of time added - FIFO)
-        Completed (Sorted in descending order of time added)
-
-        This is why Contribution.STATE_COMPLETED is -1.
-     */
-    private String CONTRIBUTION_SORT = Contribution.Table.COLUMN_STATE + " DESC, " + Contribution.Table.COLUMN_UPLOADED + " DESC , (" + Contribution.Table.COLUMN_TIMESTAMP + " * " + Contribution.Table.COLUMN_STATE + ")";
+    private CompositeDisposable compositeDisposable = new CompositeDisposable();
 
     private ServiceConnection uploadServiceConnection = new ServiceConnection() {
         @Override
         public void onServiceConnected(ComponentName componentName, IBinder binder) {
-            uploadService = (UploadService) ((HandlerService.HandlerServiceLocalBinder)binder).getService();
+            uploadService = (UploadService) ((HandlerService.HandlerServiceLocalBinder) binder)
+                    .getService();
             isUploadServiceConnected = true;
         }
 
         @Override
         public void onServiceDisconnected(ComponentName componentName) {
             // this should never happen
-            throw new RuntimeException("UploadService died but the rest of the process did not!");
+            Timber.e(new RuntimeException("UploadService died but the rest of the process did not!"));
         }
     };
 
     @Override
     protected void onDestroy() {
+        compositeDisposable.clear();
         getSupportFragmentManager().removeOnBackStackChangedListener(this);
         super.onDestroy();
-        if(isUploadServiceConnected) {
+        if (isUploadServiceConnected) {
             unbindService(uploadServiceConnection);
         }
     }
@@ -100,38 +101,23 @@ public  class       ContributionsActivity
     @Override
     protected void onResume() {
         super.onResume();
-        SharedPreferences sharedPreferences = PreferenceManager.getDefaultSharedPreferences(this);
-        boolean isSettingsChanged =
-                sharedPreferences.getBoolean(Prefs.IS_CONTRIBUTION_COUNT_CHANGED,false);
-        SharedPreferences.Editor editor = sharedPreferences.edit();
-        editor.putBoolean(Prefs.IS_CONTRIBUTION_COUNT_CHANGED,false);
-        editor.apply();
+        boolean isSettingsChanged = prefs.getBoolean(Prefs.IS_CONTRIBUTION_COUNT_CHANGED, false);
+        prefs.edit().putBoolean(Prefs.IS_CONTRIBUTION_COUNT_CHANGED, false).apply();
         if (isSettingsChanged) {
             refreshSource();
         }
     }
 
     @Override
-    protected void onPause() {
-        super.onPause();
-    }
-
-    @Override
-    protected void onStart() {
-        super.onStart();
-        displayFeedbackPopup();
-    }
-
-    @Override
     protected void onAuthCookieAcquired(String authCookie) {
         // Do a sync everytime we get here!
-        ContentResolver.requestSync(CommonsApplication.getInstance().getCurrentAccount(), ContributionsContentProvider.AUTHORITY, new Bundle());
+        requestSync(sessionManager.getCurrentAccount(), BuildConfig.CONTRIBUTION_AUTHORITY, new Bundle());
         Intent uploadServiceIntent = new Intent(this, UploadService.class);
         uploadServiceIntent.setAction(UploadService.ACTION_START_SERVICE);
         startService(uploadServiceIntent);
         bindService(uploadServiceIntent, uploadServiceConnection, Context.BIND_AUTO_CREATE);
 
-        allContributions = getContentResolver().query(ContributionsContentProvider.BASE_URI, Contribution.Table.ALL_FIELDS, CONTRIBUTION_SELECTION, null, CONTRIBUTION_SORT);
+        allContributions = contributionDao.loadAllContributions();
 
         getSupportLoaderManager().initLoader(0, null, this);
     }
@@ -144,69 +130,90 @@ public  class       ContributionsActivity
 
         // Activity can call methods in the fragment by acquiring a
         // reference to the Fragment from FragmentManager, using findFragmentById()
-        contributionsList = (ContributionsListFragment)getSupportFragmentManager()
+        FragmentManager supportFragmentManager = getSupportFragmentManager();
+        contributionsList = (ContributionsListFragment)supportFragmentManager
                 .findFragmentById(R.id.contributionsListFragment);
 
-        getSupportFragmentManager().addOnBackStackChangedListener(this);
+        supportFragmentManager.addOnBackStackChangedListener(this);
         if (savedInstanceState != null) {
-            mediaDetails = (MediaDetailPagerFragment)getSupportFragmentManager()
+            mediaDetails = (MediaDetailPagerFragment)supportFragmentManager
                     .findFragmentById(R.id.contributionsFragmentContainer);
+
+            getSupportLoaderManager().initLoader(0, null, this);
         }
+
         requestAuthToken();
         initDrawer();
         setTitle(getString(R.string.title_activity_contributions));
+
+
+        if (checkAccount()) {
+            new QuizChecker(this,
+                    sessionManager.getCurrentAccount().name,
+                    mediaWikiApi);
+        }
+        if (!BuildConfig.FLAVOR.equalsIgnoreCase("beta")){
+            setUploadCount();
+        }
+
     }
 
     @Override
     protected void onSaveInstanceState(Bundle outState) {
         super.onSaveInstanceState(outState);
-        outState.putBoolean("mediaDetailsVisible", (mediaDetails != null && mediaDetails.isVisible()));
+        boolean mediaDetailsVisible = mediaDetails != null && mediaDetails.isVisible();
+        outState.putBoolean("mediaDetailsVisible", mediaDetailsVisible);
     }
 
-    /** Replace whatever is in the current contributionsFragmentContainer view with mediaDetailPagerFragment,
-    /   and preserve previous state in back stack.
-    /   Called when user selects a contribution. */
+    /**
+     * Replace whatever is in the current contributionsFragmentContainer view with
+     * mediaDetailPagerFragment, and preserve previous state in back stack.
+     * Called when user selects a contribution.
+     */
     private void showDetail(int i) {
-        if(mediaDetails == null ||!mediaDetails.isVisible()) {
+        if (mediaDetails == null || !mediaDetails.isVisible()) {
             mediaDetails = new MediaDetailPagerFragment();
-            this.getSupportFragmentManager()
+            FragmentManager supportFragmentManager = getSupportFragmentManager();
+            supportFragmentManager
                     .beginTransaction()
                     .replace(R.id.contributionsFragmentContainer, mediaDetails)
                     .addToBackStack(null)
                     .commit();
-            this.getSupportFragmentManager().executePendingTransactions();
+            supportFragmentManager.executePendingTransactions();
         }
         mediaDetails.showImage(i);
     }
 
     public void retryUpload(int i) {
         allContributions.moveToPosition(i);
-        Contribution c = Contribution.fromCursor(allContributions);
-        if(c.getState() == Contribution.STATE_FAILED) {
+        Contribution c = contributionDao.fromCursor(allContributions);
+        if (c.getState() == STATE_FAILED) {
             uploadService.queue(UploadService.ACTION_UPLOAD_FILE, c);
-            Timber.d("Restarting for %s", c.toContentValues());
+            Timber.d("Restarting for %s", c.toString());
         } else {
-            Timber.d("Skipping re-upload for non-failed %s", c.toContentValues());
+            Timber.d("Skipping re-upload for non-failed %s", c.toString());
         }
     }
 
     public void deleteUpload(int i) {
         allContributions.moveToPosition(i);
-        Contribution c = Contribution.fromCursor(allContributions);
-        if(c.getState() == Contribution.STATE_FAILED) {
-            Timber.d("Deleting failed contrib %s", c.toContentValues());
-            c.setContentProviderClient(getContentResolver().acquireContentProviderClient(ContributionsContentProvider.AUTHORITY));
-            c.delete();
+        Contribution c = contributionDao.fromCursor(allContributions);
+        if (c.getState() == STATE_FAILED) {
+            Timber.d("Deleting failed contrib %s", c.toString());
+            // If upload fails and then user decides to cancel upload at all, which means contribution
+            // object will be deleted. So we have to delete temp file for that contribution.
+            ContributionUtils.removeTemporaryFile(c.getLocalUri());
+            contributionDao.delete(c);
         } else {
-            Timber.d("Skipping deletion for non-failed contrib %s", c.toContentValues());
+            Timber.d("Skipping deletion for non-failed contrib %s", c.toString());
         }
     }
 
     @Override
     public boolean onOptionsItemSelected(MenuItem item) {
-        switch(item.getItemId()) {
+        switch (item.getItemId()) {
             case android.R.id.home:
-                if(mediaDetails.isVisible()) {
+                if (mediaDetails.isVisible()) {
                     getSupportFragmentManager().popBackStack();
                 }
                 return true;
@@ -232,25 +239,26 @@ public  class       ContributionsActivity
 
     @Override
     public Loader<Cursor> onCreateLoader(int i, Bundle bundle) {
-        SharedPreferences sharedPref =
-                PreferenceManager.getDefaultSharedPreferences(this);
-        int uploads = sharedPref.getInt(Prefs.UPLOADS_SHOWING, 100);
-        return new CursorLoader(this, ContributionsContentProvider.BASE_URI,
-                Contribution.Table.ALL_FIELDS, CONTRIBUTION_SELECTION, null,
-                CONTRIBUTION_SORT + "LIMIT " + uploads);
+        int uploads = prefs.getInt(UPLOADS_SHOWING, 100);
+        return new CursorLoader(this, BASE_URI,
+                ALL_FIELDS, "", null,
+                ContributionDao.CONTRIBUTION_SORT + "LIMIT " + uploads);
     }
 
     @Override
     public void onLoadFinished(Loader<Cursor> cursorLoader, Cursor cursor) {
-        if(contributionsList.getAdapter() == null) {
-            contributionsList
-                    .setAdapter(new ContributionsListAdapter(getApplicationContext(), cursor, 0));
+        contributionsList.changeProgressBarVisibility(false);
+
+        if (contributionsList.getAdapter() == null) {
+            contributionsList.setAdapter(new ContributionsListAdapter(getApplicationContext(),
+                    cursor, 0, contributionDao));
         } else {
-            ((CursorAdapter)contributionsList.getAdapter()).swapCursor(cursor);
+            ((CursorAdapter) contributionsList.getAdapter()).swapCursor(cursor);
         }
 
-        setUploadCount();
-
+        if (contributionsList.getAdapter().getCount()>0){
+            contributionsList.changeEmptyScreen(false);
+        }
         contributionsList.clearSyncMessage();
         notifyAndMigrateDataSetObservers();
     }
@@ -266,39 +274,46 @@ public  class       ContributionsActivity
         if (contributionsList.getAdapter() == null) {
             // not yet ready to return data
             return null;
-        } else  {
-            return Contribution.fromCursor((Cursor) contributionsList.getAdapter().getItem(i));
+        } else {
+            return contributionDao.fromCursor((Cursor) contributionsList.getAdapter().getItem(i));
         }
     }
 
     @Override
     public int getTotalMediaCount() {
-        if(contributionsList.getAdapter() == null) {
+        if (contributionsList.getAdapter() == null) {
             return 0;
         }
         return contributionsList.getAdapter().getCount();
     }
 
+    @SuppressWarnings("ConstantConditions")
     private void setUploadCount() {
-        UploadCountClient uploadCountClient = new UploadCountClient();
-        CommonsApplication application = CommonsApplication.getInstance();
-        ListenableFuture<Integer> future = uploadCountClient
-                .getUploadCount(application.getCurrentAccount().name);
-        Futures.addCallback(future, new FutureCallback<Integer>() {
-            @Override
-            public void onSuccess(Integer uploadCount) {
-                getSupportActionBar().setSubtitle(getResources()
-                        .getQuantityString(R.plurals.contributions_subtitle,
-                                uploadCount,
-                                uploadCount));
-            }
-
-            @Override
-            public void onFailure(@NonNull Throwable t) {
-                Timber.e(t, "Fetching upload count failed");
-            }
-        }, ExecutorUtils.uiExecutor());
+        compositeDisposable.add(mediaWikiApi
+                .getUploadCount(sessionManager.getCurrentAccount().name)
+                .subscribeOn(Schedulers.io())
+                .observeOn(AndroidSchedulers.mainThread())
+                .subscribe(this::displayUploadCount,
+                        t -> Timber.e(t, "Fetching upload count failed")
+                ));
     }
+
+    private void displayUploadCount(Integer uploadCount) {
+        if (isFinishing()
+                || getSupportActionBar() == null
+                || getResources() == null) {
+            return;
+        }
+        
+        getSupportActionBar().setSubtitle(getResources()
+                .getQuantityString(R.plurals.contributions_subtitle,
+                        uploadCount, uploadCount));
+    }
+
+    public void betaSetUploadCount(int betaUploadCount) {
+        displayUploadCount(betaUploadCount);
+    }
+
 
     @Override
     public void notifyDatasetChanged() {
@@ -340,6 +355,21 @@ public  class       ContributionsActivity
         }
     }
 
+    /**
+     * to ensure user is logged in
+     * @return
+     */
+    private boolean checkAccount() {
+        Account currentAccount = sessionManager.getCurrentAccount();
+        if (currentAccount == null) {
+            Timber.d("Current account is null");
+            ViewUtil.showLongToast(this, getResources().getString(R.string.user_not_logged_in));
+            sessionManager.forceLogin(this);
+            return false;
+        }
+        return true;
+    }
+
     @Override
     public void onBackStackChanged() {
         initBackButton();
@@ -348,62 +378,5 @@ public  class       ContributionsActivity
     @Override
     public void refreshSource() {
         getSupportLoaderManager().restartLoader(0, null, this);
-    }
-
-    public static void startYourself(Context context) {
-        Intent contributionsIntent = new Intent(context, ContributionsActivity.class);
-        context.startActivity(contributionsIntent);
-    }
-
-    private void displayFeedbackPopup() {
-
-        Date popupMessageEndDate = null;
-        try {
-            String validUntil = "23/08/2017";
-            SimpleDateFormat sdf = new SimpleDateFormat("dd/MM/yyyy");
-            popupMessageEndDate = sdf.parse(validUntil);
-        } catch (ParseException e) {
-            e.printStackTrace();
-        }
-
-        final SharedPreferences prefs =  PreferenceManager.getDefaultSharedPreferences(
-                CommonsApplication.getInstance());
-
-        // boolean to save users request about displaying popup
-        boolean displayFeedbackPopup = prefs.getBoolean("display_feedbak_popup", true);
-
-        // boolean to recognize is application re-started. Will be used for "remind me later" option
-        int appStartCounter = prefs.getInt("app_start_counter" ,0);
-
-        // if time is valid and shared pref says display
-        if (new Date().before(popupMessageEndDate) && displayFeedbackPopup && (appStartCounter == 4)) {
-
-            new AlertDialog.Builder(this)
-            .setTitle(getResources().getString(R.string.feedback_popup_title))
-            .setMessage(getResources().getString(R.string.feedback_popup_description))
-            .setPositiveButton(getResources().getString(R.string.feedback_popup_accept),
-                    new DialogInterface.OnClickListener() {
-                        public void onClick(DialogInterface dialog, int which) {
-                            // Go to the page
-                            Intent browserIntent = new Intent(Intent.ACTION_VIEW, Uri
-                                    .parse(getResources()
-                                    .getString(R.string.feedback_page_url)));
-                            startActivity(browserIntent);
-                            // No need to dislay this window to the user again.
-                            prefs.edit().putBoolean("display_feedbak_popup" , false).commit();
-                            dialog.dismiss();
-                        }
-                    })
-            .setNegativeButton(getResources().getString(R.string.feedback_popup_decline),
-                    new DialogInterface.OnClickListener() {
-                        @Override
-                        public void onClick(DialogInterface dialog, int which) {
-                            // Dismiss the dialog and not to show it later
-                            prefs.edit().putBoolean("display_feedbak_popup", false).commit();
-                            dialog.dismiss();
-                        }
-                    })
-            .create().show();
-        }
     }
 }

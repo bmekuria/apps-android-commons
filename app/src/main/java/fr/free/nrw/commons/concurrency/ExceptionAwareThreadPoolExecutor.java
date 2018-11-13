@@ -6,7 +6,6 @@ import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadFactory;
 
-
 class ExceptionAwareThreadPoolExecutor extends ScheduledThreadPoolExecutor {
 
     private final ExceptionHandler exceptionHandler;
@@ -38,4 +37,3 @@ class ExceptionAwareThreadPoolExecutor extends ScheduledThreadPoolExecutor {
         }
     }
 }
-
